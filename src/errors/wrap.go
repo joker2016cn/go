@@ -49,7 +49,7 @@ func Is(err, target error) bool {
 		if x, ok := err.(interface{ Is(error) bool }); ok && x.Is(target) {
 			return true
 		}
-		// TODO: consider supporing target.Is(err). This would allow
+		// TODO: consider supporting target.Is(err). This would allow
 		// user-definable predicates, but also may allow for coping with sloppy
 		// APIs, thereby making it easier to get away with them.
 		if err = Unwrap(err); err == nil {
@@ -70,7 +70,7 @@ func Is(err, target error) bool {
 // setting target.
 //
 // An error type might provide an As method so it can be treated as if it were a
-// a different error type.
+// different error type.
 //
 // As panics if target is not a non-nil pointer to either a type that implements
 // error, or to any interface type.

@@ -16,6 +16,7 @@ const enableTrace = false
 
 var trace bool
 var traceIndent []byte
+var skipDowidthForTracing bool
 
 func tracePrint(title string, n *Node) func(np **Node) {
 	indent := traceIndent
@@ -29,6 +30,8 @@ func tracePrint(title string, n *Node) func(np **Node) {
 		tc = n.Typecheck()
 	}
 
+	skipDowidthForTracing = true
+	defer func() { skipDowidthForTracing = false }()
 	fmt.Printf("%s: %s%s %p %s %v tc=%d\n", pos, indent, title, n, op, n, tc)
 	traceIndent = append(traceIndent, ". "...)
 
@@ -51,6 +54,8 @@ func tracePrint(title string, n *Node) func(np **Node) {
 			typ = n.Type
 		}
 
+		skipDowidthForTracing = true
+		defer func() { skipDowidthForTracing = false }()
 		fmt.Printf("%s: %s=> %p %s %v tc=%d type=%#L\n", pos, indent, n, op, n, tc, typ)
 	}
 }
@@ -603,7 +608,7 @@ func typecheck1(n *Node, top int) (res *Node) {
 				n.Type = nil
 				return n
 			}
-			if t.IsSigned() && !langSupported(1, 13) {
+			if t.IsSigned() && !langSupported(1, 13, curpkg()) {
 				yyerrorv("go1.13", "invalid operation: %v (signed shift count type %v)", n, r.Type)
 				n.Type = nil
 				return n
@@ -828,20 +833,17 @@ func typecheck1(n *Node, top int) (res *Node) {
 		default:
 			checklvalue(n.Left, "take the address of")
 			r := outervalue(n.Left)
-			if r.Orig != r && r.Op == ONAME {
-				Fatalf("found non-orig name node %v", r) // TODO(mdempsky): What does this mean?
-			}
-			for l := n.Left; ; l = l.Left {
-				l.SetAddrtaken(true)
-				if l.IsClosureVar() && !capturevarscomplete {
+			if r.Op == ONAME {
+				if r.Orig != r {
+					Fatalf("found non-orig name node %v", r) // TODO(mdempsky): What does this mean?
+				}
+				r.Name.SetAddrtaken(true)
+				if r.Name.IsClosureVar() && !capturevarscomplete {
 					// Mark the original variable as Addrtaken so that capturevars
 					// knows not to pass it by value.
 					// But if the capturevars phase is complete, don't touch it,
 					// in case l.Name's containing function has not yet been compiled.
-					l.Name.Defn.SetAddrtaken(true)
-				}
-				if l == r {
-					break
+					r.Name.Defn.Name.SetAddrtaken(true)
 				}
 			}
 			n.Left = defaultlit(n.Left, nil)
@@ -1803,7 +1805,7 @@ func typecheck1(n *Node, top int) (res *Node) {
 
 	case OPRINT, OPRINTN:
 		ok |= ctxStmt
-		typecheckslice(n.List.Slice(), ctxExpr)
+		typecheckargs(n)
 		ls := n.List.Slice()
 		for i1, n1 := range ls {
 			// Special case for print: int constant is int64, not int.
@@ -2780,7 +2782,7 @@ func typecheckcomplit(n *Node) (res *Node) {
 		}
 		elemType := n.Right.Right.Type
 
-		length := typecheckarraylit(elemType, -1, n.List.Slice())
+		length := typecheckarraylit(elemType, -1, n.List.Slice(), "array literal")
 
 		n.Op = OARRAYLIT
 		n.Type = types.NewArray(elemType, length)
@@ -2802,12 +2804,12 @@ func typecheckcomplit(n *Node) (res *Node) {
 		n.Type = nil
 
 	case TARRAY:
-		typecheckarraylit(t.Elem(), t.NumElem(), n.List.Slice())
+		typecheckarraylit(t.Elem(), t.NumElem(), n.List.Slice(), "array literal")
 		n.Op = OARRAYLIT
 		n.Right = nil
 
 	case TSLICE:
-		length := typecheckarraylit(t.Elem(), -1, n.List.Slice())
+		length := typecheckarraylit(t.Elem(), -1, n.List.Slice(), "slice literal")
 		n.Op = OSLICELIT
 		n.Right = nodintconst(length)
 
@@ -2958,7 +2960,8 @@ func typecheckcomplit(n *Node) (res *Node) {
 	return n
 }
 
-func typecheckarraylit(elemType *types.Type, bound int64, elts []*Node) int64 {
+// typecheckarraylit type-checks a sequence of slice/array literal elements.
+func typecheckarraylit(elemType *types.Type, bound int64, elts []*Node, ctx string) int64 {
 	// If there are key/value pairs, create a map to keep seen
 	// keys so we can check for duplicate indices.
 	var indices map[int64]bool
@@ -2993,12 +2996,12 @@ func typecheckarraylit(elemType *types.Type, bound int64, elts []*Node) int64 {
 		r := *vp
 		r = pushtype(r, elemType)
 		r = typecheck(r, ctxExpr)
-		*vp = assignconv(r, elemType, "array or slice literal")
+		*vp = assignconv(r, elemType, ctx)
 
 		if key >= 0 {
 			if indices != nil {
 				if indices[key] {
-					yyerror("duplicate index in array literal: %d", key)
+					yyerror("duplicate index in %s: %d", ctx, key)
 				} else {
 					indices[key] = true
 				}
@@ -3061,17 +3064,11 @@ func checkassign(stmt *Node, n *Node) {
 	// Variables declared in ORANGE are assigned on every iteration.
 	if n.Name == nil || n.Name.Defn != stmt || stmt.Op == ORANGE {
 		r := outervalue(n)
-		var l *Node
-		for l = n; l != r; l = l.Left {
-			l.SetAssigned(true)
-			if l.IsClosureVar() {
-				l.Name.Defn.SetAssigned(true)
+		if r.Op == ONAME {
+			r.Name.SetAssigned(true)
+			if r.Name.IsClosureVar() {
+				r.Name.Defn.Name.SetAssigned(true)
 			}
-		}
-
-		l.SetAssigned(true)
-		if l.IsClosureVar() {
-			l.Name.Defn.SetAssigned(true)
 		}
 	}
 
@@ -3821,6 +3818,33 @@ func checkreturn(fn *Node) {
 
 func deadcode(fn *Node) {
 	deadcodeslice(fn.Nbody)
+	deadcodefn(fn)
+}
+
+func deadcodefn(fn *Node) {
+	if fn.Nbody.Len() == 0 {
+		return
+	}
+
+	for _, n := range fn.Nbody.Slice() {
+		if n.Ninit.Len() > 0 {
+			return
+		}
+		switch n.Op {
+		case OIF:
+			if !Isconst(n.Left, CTBOOL) || n.Nbody.Len() > 0 || n.Rlist.Len() > 0 {
+				return
+			}
+		case OFOR:
+			if !Isconst(n.Left, CTBOOL) || n.Left.Bool() {
+				return
+			}
+		default:
+			return
+		}
+	}
+
+	fn.Nbody.Set([]*Node{nod(OEMPTY, nil, nil)})
 }
 
 func deadcodeslice(nn Nodes) {
@@ -3926,4 +3950,21 @@ func getIotaValue() int64 {
 	}
 
 	return -1
+}
+
+// curpkg returns the current package, based on Curfn.
+func curpkg() *types.Pkg {
+	fn := Curfn
+	if fn == nil {
+		// Initialization expressions for package-scope variables.
+		return localpkg
+	}
+
+	// TODO(mdempsky): Standardize on either ODCLFUNC or ONAME for
+	// Curfn, rather than mixing them.
+	if fn.Op == ODCLFUNC {
+		fn = fn.Func.Nname
+	}
+
+	return fnpkg(fn)
 }

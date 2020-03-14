@@ -555,9 +555,6 @@ func callReflect(ctxt *makeFuncImpl, frame unsafe.Pointer, retValid *bool) {
 	// Copy results back into argument frame.
 	if numOut > 0 {
 		off += -off & (ptrSize - 1)
-		if runtime.GOARCH == "amd64p32" {
-			off = align(off, 8)
-		}
 		for i, typ := range ftyp.out() {
 			v := out[i]
 			if v.typ == nil {
@@ -697,8 +694,7 @@ func callMethod(ctxt *methodValue, frame unsafe.Pointer, retValid *bool) {
 
 	// Copy in receiver and rest of args.
 	storeRcvr(rcvr, scratch)
-	// Align the first arg. Only on amd64p32 the alignment can be
-	// larger than ptrSize.
+	// Align the first arg. The alignment can't be larger than ptrSize.
 	argOffset := uintptr(ptrSize)
 	if len(t.in()) > 0 {
 		argOffset = align(argOffset, uintptr(t.in()[0].align))
@@ -713,17 +709,11 @@ func callMethod(ctxt *methodValue, frame unsafe.Pointer, retValid *bool) {
 	// and then copies the results back into scratch.
 	call(frametype, fn, scratch, uint32(frametype.size), uint32(retOffset))
 
-	// Copy return values. On amd64p32, the beginning of return values
-	// is 64-bit aligned, so the caller's frame layout (which doesn't have
-	// a receiver) is different from the layout of the fn call, which has
-	// a receiver.
+	// Copy return values.
 	// Ignore any changes to args and just copy return values.
 	// Avoid constructing out-of-bounds pointers if there are no return values.
 	if frametype.size-retOffset > 0 {
 		callerRetOffset := retOffset - argOffset
-		if runtime.GOARCH == "amd64p32" {
-			callerRetOffset = align(argSize-argOffset, 8)
-		}
 		// This copies to the stack. Write barriers are not needed.
 		memmove(add(frame, callerRetOffset, "frametype.size > retOffset"),
 			add(scratch, retOffset, "frametype.size > retOffset"),
@@ -1417,6 +1407,11 @@ func (v Value) OverflowUint(x uint64) bool {
 	panic(&ValueError{"reflect.Value.OverflowUint", v.kind()})
 }
 
+//go:nocheckptr
+// This prevents inlining Value.Pointer when -d=checkptr is enabled,
+// which ensures cmd/compile can recognize unsafe.Pointer(v.Pointer())
+// and make an exception.
+
 // Pointer returns v's value as a uintptr.
 // It returns uintptr instead of unsafe.Pointer so that
 // code using reflect cannot obtain unsafe.Pointers
@@ -1924,6 +1919,11 @@ func (v Value) Uint() uint64 {
 	panic(&ValueError{"reflect.Value.Uint", v.kind()})
 }
 
+//go:nocheckptr
+// This prevents inlining Value.UnsafeAddr when -d=checkptr is enabled,
+// which ensures cmd/compile can recognize unsafe.Pointer(v.UnsafeAddr())
+// and make an exception.
+
 // UnsafeAddr returns a pointer to v's data.
 // It is for advanced clients that also import the "unsafe" package.
 // It panics if v is not addressable.
@@ -2156,7 +2156,11 @@ type SelectCase struct {
 // and, if that case was a receive operation, the value received and a
 // boolean indicating whether the value corresponds to a send on the channel
 // (as opposed to a zero value received because the channel is closed).
+// Select supports a maximum of 65536 cases.
 func Select(cases []SelectCase) (chosen int, recv Value, recvOK bool) {
+	if len(cases) > 65536 {
+		panic("reflect.Select: too many cases (max 65536)")
+	}
 	// NOTE: Do not trust that caller is not modifying cases data underfoot.
 	// The range is safe because the caller cannot modify our copy of the len
 	// and each iteration makes its own copy of the value c.
@@ -2476,6 +2480,11 @@ func convertOp(dst, src *rtype) func(Value, Type) Value {
 				return cvtRunesString
 			}
 		}
+
+	case Chan:
+		if dst.Kind() == Chan && specialChannelAssignability(dst, src) {
+			return cvtDirect
+		}
 	}
 
 	// dst and src have same underlying type.
@@ -2614,12 +2623,12 @@ func cvtComplex(v Value, t Type) Value {
 
 // convertOp: intXX -> string
 func cvtIntString(v Value, t Type) Value {
-	return makeString(v.flag.ro(), string(v.Int()), t)
+	return makeString(v.flag.ro(), string(rune(v.Int())), t)
 }
 
 // convertOp: uintXX -> string
 func cvtUintString(v Value, t Type) Value {
-	return makeString(v.flag.ro(), string(v.Uint()), t)
+	return makeString(v.flag.ro(), string(rune(v.Uint())), t)
 }
 
 // convertOp: []byte -> string

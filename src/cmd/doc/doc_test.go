@@ -27,7 +27,10 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	dirsInit(Dir{"testdata", testdataDir}, Dir{"testdata/nested", filepath.Join(testdataDir, "nested")}, Dir{"testdata/nested/nested", filepath.Join(testdataDir, "nested", "nested")})
+	dirsInit(
+		Dir{importPath: "testdata", dir: testdataDir},
+		Dir{importPath: "testdata/nested", dir: filepath.Join(testdataDir, "nested")},
+		Dir{importPath: "testdata/nested/nested", dir: filepath.Join(testdataDir, "nested", "nested")})
 
 	os.Exit(m.Run())
 }
@@ -173,6 +176,7 @@ var tests = []test{
 			`Comment about block of variables`,
 			`VarFive = 5`,
 			`var ExportedVariable = 1`,
+			`var ExportedVarOfUnExported unexportedType`,
 			`var LongLine = newLongLine\(`,
 			`var MultiLineVar = map\[struct {`,
 			`FUNCTIONS`,
@@ -206,6 +210,13 @@ var tests = []test{
 			`unexportedField`,
 			`func \(unexportedType\)`,
 		},
+	},
+	// Package with just the package declaration. Issue 31457.
+	{
+		"only package declaration",
+		[]string{"-all", p + "/nested/empty"},
+		[]string{`package empty .*import`},
+		nil,
 	},
 	// Package dump -short
 	{
@@ -710,6 +721,40 @@ var tests = []test{
 		},
 		[]string{
 			`CaseMatch`,
+		},
+	},
+
+	// Merging comments with -src.
+	{
+		"merge comments with -src A",
+		[]string{"-src", p + "/merge", `A`},
+		[]string{
+			`A doc`,
+			`func A`,
+			`A comment`,
+		},
+		[]string{
+			`Package A doc`,
+			`Package B doc`,
+			`B doc`,
+			`B comment`,
+			`B doc`,
+		},
+	},
+	{
+		"merge comments with -src B",
+		[]string{"-src", p + "/merge", `B`},
+		[]string{
+			`B doc`,
+			`func B`,
+			`B comment`,
+		},
+		[]string{
+			`Package A doc`,
+			`Package B doc`,
+			`A doc`,
+			`A comment`,
+			`A doc`,
 		},
 	},
 

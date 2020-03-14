@@ -15,7 +15,7 @@ func nilcheckelim(f *Func) {
 	// A nil check is redundant if the same nil check was successful in a
 	// dominating block. The efficacy of this pass depends heavily on the
 	// efficacy of the cse pass.
-	sdom := f.sdom()
+	sdom := f.Sdom()
 
 	// TODO: Eliminate more nil checks.
 	// We can recursively remove any chain of fixed offset calculations,
@@ -199,8 +199,8 @@ var faultOnLoad = objabi.GOOS != "aix"
 // nilcheckelim2 eliminates unnecessary nil checks.
 // Runs after lowering and scheduling.
 func nilcheckelim2(f *Func) {
-	unnecessary := f.newSparseSet(f.NumValues())
-	defer f.retSparseSet(unnecessary)
+	unnecessary := f.newSparseMap(f.NumValues()) // map from pointer that will be dereferenced to index of dereferencing value in b.Values[]
+	defer f.retSparseMap(unnecessary)
 
 	pendingLines := f.cachedLineStarts // Holds statement boundaries that need to be moved to a new value/block
 
@@ -218,9 +218,21 @@ func nilcheckelim2(f *Func) {
 				if f.fe.Debug_checknil() && v.Pos.Line() > 1 {
 					f.Warnl(v.Pos, "removed nil check")
 				}
-				if v.Pos.IsStmt() == src.PosIsStmt {
+				// For bug 33724, policy is that we might choose to bump an existing position
+				// off the faulting load/store in favor of the one from the nil check.
+
+				// Iteration order means that first nilcheck in the chain wins, others
+				// are bumped into the ordinary statement preservation algorithm.
+				u := b.Values[unnecessary.get(v.Args[0].ID)]
+				if !u.Pos.SameFileAndLine(v.Pos) {
+					if u.Pos.IsStmt() == src.PosIsStmt {
+						pendingLines.add(u.Pos)
+					}
+					u.Pos = v.Pos
+				} else if v.Pos.IsStmt() == src.PosIsStmt {
 					pendingLines.add(v.Pos)
 				}
+
 				v.reset(OpUnknown)
 				firstToRemove = i
 				continue
@@ -273,6 +285,10 @@ func nilcheckelim2(f *Func) {
 			for _, ptr := range ptrs {
 				// Check to make sure the offset is small.
 				switch opcodeTable[v.Op].auxType {
+				case auxSym:
+					if v.Aux != nil {
+						continue
+					}
 				case auxSymOff:
 					if v.Aux != nil || v.AuxInt < 0 || v.AuxInt >= minZeroPage {
 						continue
@@ -294,7 +310,7 @@ func nilcheckelim2(f *Func) {
 				}
 				// This instruction is guaranteed to fault if ptr is nil.
 				// Any previous nil check op is unnecessary.
-				unnecessary.add(ptr.ID)
+				unnecessary.set(ptr.ID, int32(i), src.NoXPos)
 			}
 		}
 		// Remove values we've clobbered with OpUnknown.
@@ -302,7 +318,7 @@ func nilcheckelim2(f *Func) {
 		for j := i; j < len(b.Values); j++ {
 			v := b.Values[j]
 			if v.Op != OpUnknown {
-				if v.Pos.IsStmt() != src.PosNotStmt && pendingLines.contains(v.Pos) {
+				if !notStmtBoundary(v.Op) && pendingLines.contains(v.Pos) { // Late in compilation, so any remaining NotStmt values are probably okay now.
 					v.Pos = v.Pos.WithIsStmt()
 					pendingLines.remove(v.Pos)
 				}

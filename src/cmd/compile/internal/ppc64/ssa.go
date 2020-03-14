@@ -6,6 +6,7 @@ package ppc64
 
 import (
 	"cmd/compile/internal/gc"
+	"cmd/compile/internal/logopt"
 	"cmd/compile/internal/ssa"
 	"cmd/compile/internal/types"
 	"cmd/internal/obj"
@@ -335,12 +336,16 @@ func ssaGenValue(s *gc.SSAGenState, v *ssa.Value) {
 		pisync.To.Type = obj.TYPE_NONE
 		gc.Patch(p2, pisync)
 
-	case ssa.OpPPC64LoweredAtomicStore32,
+	case ssa.OpPPC64LoweredAtomicStore8,
+		ssa.OpPPC64LoweredAtomicStore32,
 		ssa.OpPPC64LoweredAtomicStore64:
 		// SYNC or LWSYNC
-		// MOVD/MOVW arg1,(arg0)
+		// MOVB/MOVW/MOVD arg1,(arg0)
 		st := ppc64.AMOVD
-		if v.Op == ssa.OpPPC64LoweredAtomicStore32 {
+		switch v.Op {
+		case ssa.OpPPC64LoweredAtomicStore8:
+			st = ppc64.AMOVB
+		case ssa.OpPPC64LoweredAtomicStore32:
 			st = ppc64.AMOVW
 		}
 		arg0 := v.Args[0].Reg()
@@ -1235,14 +1240,14 @@ func ssaGenValue(s *gc.SSAGenState, v *ssa.Value) {
 		p.From.Type = obj.TYPE_REG
 		p.From.Reg = v.Args[0].Reg()
 		p.To.Type = obj.TYPE_REG
-		p.To.Reg = ppc64.REG_CTR
+		p.To.Reg = ppc64.REG_LR
 
 		if v.Args[0].Reg() != ppc64.REG_R12 {
 			v.Fatalf("Function address for %v should be in R12 %d but is in %d", v.LongString(), ppc64.REG_R12, p.From.Reg)
 		}
 
 		pp := s.Call(v)
-		pp.To.Reg = ppc64.REG_CTR
+		pp.To.Reg = ppc64.REG_LR
 
 		if gc.Ctxt.Flag_shared {
 			// When compiling Go into PIC, the function we just
@@ -1309,6 +1314,9 @@ func ssaGenValue(s *gc.SSAGenState, v *ssa.Value) {
 			p.To.Type = obj.TYPE_REG
 			p.To.Reg = ppc64.REGTMP
 		}
+		if logopt.Enabled() {
+			logopt.LogOpt(v.Pos, "nilcheck", "genssa", v.Block.Func.Name)
+		}
 		if gc.Debug_checknil != 0 && v.Pos.Line() > 1 { // v.Pos.Line()==1 in generated wrappers
 			gc.Warnl(v.Pos, "generated nil check")
 		}
@@ -1320,7 +1328,7 @@ func ssaGenValue(s *gc.SSAGenState, v *ssa.Value) {
 		v.Fatalf("Pseudo-op should not make it to codegen: %s ###\n", v.LongString())
 	case ssa.OpPPC64InvertFlags:
 		v.Fatalf("InvertFlags should never make it to codegen %v", v.LongString())
-	case ssa.OpPPC64FlagEQ, ssa.OpPPC64FlagLT, ssa.OpPPC64FlagGT:
+	case ssa.OpPPC64FlagEQ, ssa.OpPPC64FlagLT, ssa.OpPPC64FlagGT, ssa.OpPPC64FlagCarrySet, ssa.OpPPC64FlagCarryClear:
 		v.Fatalf("Flag* ops should never make it to codegen %v", v.LongString())
 	case ssa.OpClobber:
 		// TODO: implement for clobberdead experiment. Nop is ok for now.

@@ -385,7 +385,7 @@ func raceinit() (gctx, pctx uintptr) {
 	if end < firstmoduledata.ebss {
 		end = firstmoduledata.ebss
 	}
-	size := round(end-start, _PageSize)
+	size := alignUp(end-start, _PageSize)
 	racecall(&__tsan_map_shadow, start, size, 0, 0)
 	racedatastart = start
 	racedataend = start + size
@@ -403,6 +403,9 @@ func racefini() {
 	// already held it's assumed that the first caller exits the program
 	// so other calls can hang forever without an issue.
 	lock(&raceFiniLock)
+	// We're entering external code that may call ExitProcess on
+	// Windows.
+	osPreemptExtEnter(getg().m)
 	racecall(&__tsan_fini, 0, 0, 0, 0)
 }
 
@@ -460,6 +463,11 @@ func racegoend() {
 }
 
 //go:nosplit
+func racectxend(racectx uintptr) {
+	racecall(&__tsan_go_end, racectx, 0, 0, 0)
+}
+
+//go:nosplit
 func racewriterangepc(addr unsafe.Pointer, sz, callpc, pc uintptr) {
 	_g_ := getg()
 	if _g_ != _g_.m.curg {
@@ -504,6 +512,14 @@ func raceacquireg(gp *g, addr unsafe.Pointer) {
 		return
 	}
 	racecall(&__tsan_acquire, gp.racectx, uintptr(addr), 0, 0)
+}
+
+//go:nosplit
+func raceacquirectx(racectx uintptr, addr unsafe.Pointer) {
+	if !isvalidaddr(addr) {
+		return
+	}
+	racecall(&__tsan_acquire, racectx, uintptr(addr), 0, 0)
 }
 
 //go:nosplit

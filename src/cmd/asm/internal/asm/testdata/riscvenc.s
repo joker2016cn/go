@@ -60,11 +60,13 @@ start:
 	AUIPC	$0, X10					// 17050000
 	AUIPC	$0, X11					// 97050000
 	AUIPC	$1, X10					// 17150000
-	AUIPC	$1048575, X10				// 17f5ffff
+	AUIPC	$-524288, X15				// 97070080
+	AUIPC	$524287, X10				// 17f5ff7f
 
 	LUI	$0, X15					// b7070000
 	LUI	$167, X15				// b7770a00
-	LUI	$1048575, X15				// b7f7ffff
+	LUI	$-524288, X15				// b7070080
+	LUI	$524287, X15				// b7f7ff7f
 
 	SLL	X6, X5, X7				// b3936200
 	SLL	X5, X6					// 33135300
@@ -89,15 +91,15 @@ start:
 	// to 2 because they transfer control to the second instruction
 	// in the function (the first instruction being an invisible
 	// stack pointer adjustment).
-	JAL	X5, start	// JAL	X5, 2		// eff2dff0
+	JAL	X5, start	// JAL	X5, 2		// eff25ff0
 	JALR	X6, (X5)				// 67830200
 	JALR	X6, 4(X5)				// 67834200
-	BEQ	X5, X6, start	// BEQ	X5, X6, 2	// e38062f0
-	BNE	X5, X6, start	// BNE	X5, X6, 2	// e39e62ee
-	BLT	X5, X6, start	// BLT	X5, X6, 2	// e3cc62ee
-	BLTU	X5, X6, start	// BLTU	X5, X6, 2	// e3ea62ee
-	BGE	X5, X6, start	// BGE	X5, X6, 2	// e3d862ee
-	BGEU	X5, X6, start	// BGEU	X5, X6, 2	// e3f662ee
+	BEQ	X5, X6, start	// BEQ	X5, X6, 2	// e38c62ee
+	BNE	X5, X6, start	// BNE	X5, X6, 2	// e39a62ee
+	BLT	X5, X6, start	// BLT	X5, X6, 2	// e3c862ee
+	BLTU	X5, X6, start	// BLTU	X5, X6, 2	// e3e662ee
+	BGE	X5, X6, start	// BGE	X5, X6, 2	// e3d462ee
+	BGEU	X5, X6, start	// BGEU	X5, X6, 2	// e3f262ee
 
 	// 2.6: Load and Store Instructions
 	LW	(X5), X6				// 03a30200
@@ -237,3 +239,70 @@ start:
 	// Arbitrary bytes (entered in little-endian mode)
 	WORD	$0x12345678	// WORD $305419896	// 78563412
 	WORD	$0x9abcdef0	// WORD $2596069104	// f0debc9a
+
+	// MOV pseudo-instructions
+	MOV	X5, X6					// 13830200
+	MOV	$2047, X5				// 9b02f07f
+	MOV	$-2048, X5				// 9b020080
+
+	MOV	(X5), X6				// 03b30200
+	MOV	4(X5), X6				// 03b34200
+	MOVB	(X5), X6				// 03830200
+	MOVB	4(X5), X6				// 03834200
+	MOVH	(X5), X6				// 03930200
+	MOVH	4(X5), X6				// 03934200
+	MOVW	(X5), X6				// 03a30200
+	MOVW	4(X5), X6				// 03a34200
+	MOV	X5, (X6)				// 23305300
+	MOV	X5, 4(X6)				// 23325300
+	MOVB	X5, (X6)				// 23005300
+	MOVB	X5, 4(X6)				// 23025300
+	MOVH	X5, (X6)				// 23105300
+	MOVH	X5, 4(X6)				// 23125300
+	MOVW	X5, (X6)				// 23205300
+	MOVW	X5, 4(X6)				// 23225300
+
+	MOVF	4(X5), F0				// 07a04200
+	MOVF	F0, 4(X5)				// 27a20200
+	MOVF	F0, F1					// d3000020
+
+	MOVD	4(X5), F0				// 07b04200
+	MOVD	F0, 4(X5)				// 27b20200
+	MOVD	F0, F1					// d3000022
+
+	// These jumps can get printed as jumps to 2 because they go to the
+	// second instruction in the function (the first instruction is an
+	// invisible stack pointer adjustment).
+	JMP	start		// JMP	2		// 6ff0dfcc
+	JMP	(X5)					// 67800200
+	JMP	4(X5)					// 67804200
+
+	// JMP and CALL to symbol are encoded as:
+	//	AUIPC $0, TMP
+	//	JALR $0, TMP
+	// with a R_RISCV_PCREL_ITYPE relocation - the linker resolves the
+	// real address and updates the immediates for both instructions.
+	CALL	asmtest(SB)				// 970f0000
+	JMP	asmtest(SB)				// 970f0000
+
+	SEQZ	X15, X15				// 93b71700
+	SNEZ	X15, X15				// b337f000
+
+	// F extension
+	FNEGS	F0, F1					// d3100020
+
+	// TODO(jsing): FNES gets encoded as FEQS+XORI - this should
+	// be handled as a single *obj.Prog so that the full two
+	// instruction encoding is tested here.
+	FNES	F0, F1, X7				// d3a300a0
+
+	// D extension
+	FNEGD	F0, F1					// d3100022
+	FEQD	F0, F1, X5				// d3a200a2
+	FLTD	F0, F1, X5				// d39200a2
+	FLED	F0, F1, X5				// d38200a2
+
+	// TODO(jsing): FNED gets encoded as FEQD+XORI - this should
+	// be handled as a single *obj.Prog so that the full two
+	// instruction encoding is tested here.
+	FNED	F0, F1, X5				// d3a200a2

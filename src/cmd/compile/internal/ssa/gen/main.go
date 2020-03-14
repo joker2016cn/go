@@ -63,6 +63,7 @@ type opData struct {
 	usesScratch       bool   // this op requires scratch memory space
 	hasSideEffects    bool   // for "reasons", not to be eliminated.  E.g., atomic store, #19182.
 	zeroWidth         bool   // op never translates into any machine code. example: copy, which may sometimes translate to machine code, is not zero-width.
+	unsafePoint       bool   // this op is an unsafe point, i.e. not safe for async preemption
 	symEffect         string // effect this op has on symbol in aux
 	scale             uint8  // amd64/386 indexed load scale
 }
@@ -221,17 +222,19 @@ func genOp() {
 	fmt.Fprintln(w, "func (k BlockKind) String() string {return blockString[k]}")
 
 	// generate block kind auxint method
-	fmt.Fprintln(w, "var blockAuxIntType = [...]string{")
+	fmt.Fprintln(w, "func (k BlockKind) AuxIntType() string {")
+	fmt.Fprintln(w, "switch k {")
 	for _, a := range archs {
 		for _, b := range a.blocks {
 			if b.auxint == "" {
 				continue
 			}
-			fmt.Fprintf(w, "Block%s%s:\"%s\",\n", a.Name(), b.name, b.auxint)
+			fmt.Fprintf(w, "case Block%s%s: return \"%s\"\n", a.Name(), b.name, b.auxint)
 		}
 	}
 	fmt.Fprintln(w, "}")
-	fmt.Fprintln(w, "func (k BlockKind) AuxIntType() string {return blockAuxIntType[k]}")
+	fmt.Fprintln(w, "return \"\"")
+	fmt.Fprintln(w, "}")
 
 	// generate Op* declarations
 	fmt.Fprintln(w, "const (")
@@ -304,13 +307,13 @@ func genOp() {
 			}
 			if v.faultOnNilArg0 {
 				fmt.Fprintln(w, "faultOnNilArg0: true,")
-				if v.aux != "SymOff" && v.aux != "SymValAndOff" && v.aux != "Int64" && v.aux != "Int32" && v.aux != "" {
+				if v.aux != "Sym" && v.aux != "SymOff" && v.aux != "SymValAndOff" && v.aux != "Int64" && v.aux != "Int32" && v.aux != "" {
 					log.Fatalf("faultOnNilArg0 with aux %s not allowed", v.aux)
 				}
 			}
 			if v.faultOnNilArg1 {
 				fmt.Fprintln(w, "faultOnNilArg1: true,")
-				if v.aux != "SymOff" && v.aux != "SymValAndOff" && v.aux != "Int64" && v.aux != "Int32" && v.aux != "" {
+				if v.aux != "Sym" && v.aux != "SymOff" && v.aux != "SymValAndOff" && v.aux != "Int64" && v.aux != "Int32" && v.aux != "" {
 					log.Fatalf("faultOnNilArg1 with aux %s not allowed", v.aux)
 				}
 			}
@@ -322,6 +325,9 @@ func genOp() {
 			}
 			if v.zeroWidth {
 				fmt.Fprintln(w, "zeroWidth: true,")
+			}
+			if v.unsafePoint {
+				fmt.Fprintln(w, "unsafePoint: true,")
 			}
 			needEffect := strings.HasPrefix(v.aux, "Sym")
 			if v.symEffect != "" {
@@ -399,6 +405,8 @@ func genOp() {
 
 	fmt.Fprintln(w, "func (o Op) SymEffect() SymEffect { return opcodeTable[o].symEffect }")
 	fmt.Fprintln(w, "func (o Op) IsCall() bool { return opcodeTable[o].call }")
+	fmt.Fprintln(w, "func (o Op) HasSideEffects() bool { return opcodeTable[o].hasSideEffects }")
+	fmt.Fprintln(w, "func (o Op) UnsafePoint() bool { return opcodeTable[o].unsafePoint }")
 
 	// generate registers
 	for _, a := range archs {

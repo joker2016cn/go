@@ -186,6 +186,7 @@ const (
 	// mark flags
 	LEAF = 1 << iota
 	BRANCH
+	USETMP // generated code of this Prog uses REGTMP
 )
 
 const ( // comments from func aclass in asmz.go
@@ -386,6 +387,9 @@ const (
 	// insert program mask
 	AIPM
 
+	// set program mask
+	ASPM
+
 	// compare and swap
 	ACS
 	ACSG
@@ -408,6 +412,10 @@ const (
 	ABVC
 	ABVS
 	ASYSCALL
+
+	// branch on count
+	ABRCT
+	ABRCTG
 
 	// compare and branch
 	ACRJ

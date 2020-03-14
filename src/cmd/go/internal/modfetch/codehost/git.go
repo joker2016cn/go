@@ -22,8 +22,9 @@ import (
 
 	"cmd/go/internal/lockedfile"
 	"cmd/go/internal/par"
-	"cmd/go/internal/semver"
 	"cmd/go/internal/web"
+
+	"golang.org/x/mod/semver"
 )
 
 // GitRepo returns the code repository at the given Git remote reference.
@@ -681,8 +682,11 @@ func (r *gitRepo) RecentTag(rev, prefix, major string) (tag string, err error) {
 
 			semtag := line[len(prefix):]
 			// Consider only tags that are valid and complete (not just major.minor prefixes).
-			if c := semver.Canonical(semtag); c != "" && strings.HasPrefix(semtag, c) && (major == "" || semver.Major(c) == major) {
-				highest = semver.Max(highest, semtag)
+			// NOTE: Do not replace the call to semver.Compare with semver.Max.
+			// We want to return the actual tag, not a canonicalized version of it,
+			// and semver.Max currently canonicalizes (see golang.org/issue/32700).
+			if c := semver.Canonical(semtag); c != "" && strings.HasPrefix(semtag, c) && (major == "" || semver.Major(c) == major) && semver.Compare(semtag, highest) > 0 {
+				highest = semtag
 			}
 		}
 
@@ -795,7 +799,7 @@ func (r *gitRepo) DescendsFrom(rev, tag string) (bool, error) {
 	return false, err
 }
 
-func (r *gitRepo) ReadZip(rev, subdir string, maxSize int64) (zip io.ReadCloser, actualSubdir string, err error) {
+func (r *gitRepo) ReadZip(rev, subdir string, maxSize int64) (zip io.ReadCloser, err error) {
 	// TODO: Use maxSize or drop it.
 	args := []string{}
 	if subdir != "" {
@@ -803,17 +807,17 @@ func (r *gitRepo) ReadZip(rev, subdir string, maxSize int64) (zip io.ReadCloser,
 	}
 	info, err := r.Stat(rev) // download rev into local git repo
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 
 	unlock, err := r.mu.Lock()
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	defer unlock()
 
 	if err := ensureGitAttributes(r.dir); err != nil {
-		return nil, "", err
+		return nil, err
 	}
 
 	// Incredibly, git produces different archives depending on whether
@@ -824,12 +828,12 @@ func (r *gitRepo) ReadZip(rev, subdir string, maxSize int64) (zip io.ReadCloser,
 	archive, err := Run(r.dir, "git", "-c", "core.autocrlf=input", "-c", "core.eol=lf", "archive", "--format=zip", "--prefix=prefix/", info.Name, args)
 	if err != nil {
 		if bytes.Contains(err.(*RunError).Stderr, []byte("did not match any files")) {
-			return nil, "", os.ErrNotExist
+			return nil, os.ErrNotExist
 		}
-		return nil, "", err
+		return nil, err
 	}
 
-	return ioutil.NopCloser(bytes.NewReader(archive)), "", nil
+	return ioutil.NopCloser(bytes.NewReader(archive)), nil
 }
 
 // ensureGitAttributes makes sure export-subst and export-ignore features are

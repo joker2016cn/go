@@ -71,6 +71,7 @@ func testDWARF(t *testing.T, buildmode string, expectDWARF bool, env ...string) 
 			}
 			cmd.Args = append(cmd.Args, dir)
 			if env != nil {
+				env = append(env, "CGO_CFLAGS=") // ensure CGO_CFLAGS does not contain any flags. Issue #35459
 				cmd.Env = append(os.Environ(), env...)
 			}
 			out, err := cmd.CombinedOutput()
@@ -168,6 +169,9 @@ func testDWARF(t *testing.T, buildmode string, expectDWARF bool, env ...string) 
 func TestDWARF(t *testing.T) {
 	testDWARF(t, "", true)
 	if !testing.Short() {
+		if runtime.GOOS == "windows" {
+			t.Skip("skipping Windows/c-archive; see Issue 35512 for more.")
+		}
 		t.Run("c-archive", func(t *testing.T) {
 			testDWARF(t, "c-archive", true)
 		})

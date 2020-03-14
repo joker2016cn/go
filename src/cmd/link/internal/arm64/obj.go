@@ -57,7 +57,8 @@ func Init() (*sys.Arch, ld.Arch) {
 		Gentext:          gentext,
 		Machoreloc1:      machoreloc1,
 
-		Linuxdynld: "/lib/ld-linux-aarch64.so.1",
+		Androiddynld: "/system/bin/linker64",
+		Linuxdynld:   "/lib/ld-linux-aarch64.so.1",
 
 		Freebsddynld:   "/usr/libexec/ld-elf.so.1",
 		Openbsddynld:   "/usr/libexec/ld.so",
@@ -104,17 +105,6 @@ func archinit(ctxt *ld.Link) {
 		}
 		if *ld.FlagRound == -1 {
 			*ld.FlagRound = 4096
-		}
-
-	case objabi.Hnacl:
-		ld.Elfinit(ctxt)
-		ld.HEADR = 0x10000
-		ld.Funcalign = 16
-		if *ld.FlagTextAddr == -1 {
-			*ld.FlagTextAddr = 0x20000
-		}
-		if *ld.FlagRound == -1 {
-			*ld.FlagRound = 0x10000
 		}
 	}
 }

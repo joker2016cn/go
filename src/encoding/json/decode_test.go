@@ -2411,3 +2411,119 @@ func TestUnmarshalRecursivePointer(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+type textUnmarshalerString string
+
+func (m *textUnmarshalerString) UnmarshalText(text []byte) error {
+	*m = textUnmarshalerString(strings.ToLower(string(text)))
+	return nil
+}
+
+// Test unmarshal to a map, with map key is a user defined type.
+// See golang.org/issues/34437.
+func TestUnmarshalMapWithTextUnmarshalerStringKey(t *testing.T) {
+	var p map[textUnmarshalerString]string
+	if err := Unmarshal([]byte(`{"FOO": "1"}`), &p); err != nil {
+		t.Fatalf("Unmarshal unexpected error: %v", err)
+	}
+
+	if _, ok := p["foo"]; !ok {
+		t.Errorf(`Key "foo" is not existed in map: %v`, p)
+	}
+}
+
+func TestUnmarshalMaxDepth(t *testing.T) {
+	testcases := []struct {
+		name        string
+		data        string
+		errMaxDepth bool
+	}{
+		{
+			name:        "ArrayUnderMaxNestingDepth",
+			data:        `{"a":` + strings.Repeat(`[`, 10000-1) + strings.Repeat(`]`, 10000-1) + `}`,
+			errMaxDepth: false,
+		},
+		{
+			name:        "ArrayOverMaxNestingDepth",
+			data:        `{"a":` + strings.Repeat(`[`, 10000) + strings.Repeat(`]`, 10000) + `}`,
+			errMaxDepth: true,
+		},
+		{
+			name:        "ArrayOverStackDepth",
+			data:        `{"a":` + strings.Repeat(`[`, 3000000) + strings.Repeat(`]`, 3000000) + `}`,
+			errMaxDepth: true,
+		},
+		{
+			name:        "ObjectUnderMaxNestingDepth",
+			data:        `{"a":` + strings.Repeat(`{"a":`, 10000-1) + `0` + strings.Repeat(`}`, 10000-1) + `}`,
+			errMaxDepth: false,
+		},
+		{
+			name:        "ObjectOverMaxNestingDepth",
+			data:        `{"a":` + strings.Repeat(`{"a":`, 10000) + `0` + strings.Repeat(`}`, 10000) + `}`,
+			errMaxDepth: true,
+		},
+		{
+			name:        "ObjectOverStackDepth",
+			data:        `{"a":` + strings.Repeat(`{"a":`, 3000000) + `0` + strings.Repeat(`}`, 3000000) + `}`,
+			errMaxDepth: true,
+		},
+	}
+
+	targets := []struct {
+		name     string
+		newValue func() interface{}
+	}{
+		{
+			name: "unstructured",
+			newValue: func() interface{} {
+				var v interface{}
+				return &v
+			},
+		},
+		{
+			name: "typed named field",
+			newValue: func() interface{} {
+				v := struct {
+					A interface{} `json:"a"`
+				}{}
+				return &v
+			},
+		},
+		{
+			name: "typed missing field",
+			newValue: func() interface{} {
+				v := struct {
+					B interface{} `json:"b"`
+				}{}
+				return &v
+			},
+		},
+		{
+			name: "custom unmarshaler",
+			newValue: func() interface{} {
+				v := unmarshaler{}
+				return &v
+			},
+		},
+	}
+
+	for _, tc := range testcases {
+		for _, target := range targets {
+			t.Run(target.name+"-"+tc.name, func(t *testing.T) {
+				err := Unmarshal([]byte(tc.data), target.newValue())
+				if !tc.errMaxDepth {
+					if err != nil {
+						t.Errorf("unexpected error: %v", err)
+					}
+				} else {
+					if err == nil {
+						t.Errorf("expected error containing 'exceeded max depth', got none")
+					} else if !strings.Contains(err.Error(), "exceeded max depth") {
+						t.Errorf("expected error containing 'exceeded max depth', got: %v", err)
+					}
+				}
+			})
+		}
+	}
+}

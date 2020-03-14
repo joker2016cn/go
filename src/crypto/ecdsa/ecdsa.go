@@ -33,10 +33,12 @@ import (
 	"crypto/elliptic"
 	"crypto/internal/randutil"
 	"crypto/sha512"
-	"encoding/asn1"
 	"errors"
 	"io"
 	"math/big"
+
+	"golang.org/x/crypto/cryptobyte"
+	"golang.org/x/crypto/cryptobyte/asn1"
 )
 
 // A invertible implements fast inverse mod Curve.Params().N
@@ -66,10 +68,6 @@ type PrivateKey struct {
 	D *big.Int
 }
 
-type ecdsaSignature struct {
-	R, S *big.Int
-}
-
 // Public returns the public key corresponding to priv.
 func (priv *PrivateKey) Public() crypto.PublicKey {
 	return &priv.PublicKey
@@ -88,7 +86,12 @@ func (priv *PrivateKey) Sign(rand io.Reader, digest []byte, opts crypto.SignerOp
 		return nil, err
 	}
 
-	return asn1.Marshal(ecdsaSignature{r, s})
+	var b cryptobyte.Builder
+	b.AddASN1(asn1.SEQUENCE, func(b *cryptobyte.Builder) {
+		b.AddASN1BigInt(r)
+		b.AddASN1BigInt(s)
+	})
+	return b.Bytes()
 }
 
 var one = new(big.Int).SetInt64(1)
@@ -159,7 +162,7 @@ var errZeroParam = errors.New("zero parameter")
 
 // Sign signs a hash (which should be the result of hashing a larger message)
 // using the private key, priv. If the hash is longer than the bit-length of the
-// private key's curve order, the hash will be truncated to that length.  It
+// private key's curve order, the hash will be truncated to that length. It
 // returns the signature as a pair of integers. The security of the private key
 // depends on the entropy of rand.
 func Sign(rand io.Reader, priv *PrivateKey, hash []byte) (r, s *big.Int, err error) {
@@ -199,21 +202,14 @@ func Sign(rand io.Reader, priv *PrivateKey, hash []byte) (r, s *big.Int, err err
 
 	// See [NSA] 3.4.1
 	c := priv.PublicKey.Curve
-	e := hashToInt(hash, c)
-	r, s, err = sign(priv, &csprng, c, e)
-	return
-}
-
-func signGeneric(priv *PrivateKey, csprng *cipher.StreamReader, c elliptic.Curve, e *big.Int) (r, s *big.Int, err error) {
 	N := c.Params().N
 	if N.Sign() == 0 {
 		return nil, nil, errZeroParam
 	}
-
 	var k, kInv *big.Int
 	for {
 		for {
-			k, err = randFieldElement(c, *csprng)
+			k, err = randFieldElement(c, csprng)
 			if err != nil {
 				r = nil
 				return
@@ -231,6 +227,8 @@ func signGeneric(priv *PrivateKey, csprng *cipher.StreamReader, c elliptic.Curve
 				break
 			}
 		}
+
+		e := hashToInt(hash, c)
 		s = new(big.Int).Mul(priv.D, r)
 		s.Add(s, e)
 		s.Mul(s, kInv)
@@ -239,7 +237,17 @@ func signGeneric(priv *PrivateKey, csprng *cipher.StreamReader, c elliptic.Curve
 			break
 		}
 	}
+
 	return
+}
+
+// SignASN1 signs a hash (which should be the result of hashing a larger message)
+// using the private key, priv. If the hash is longer than the bit-length of the
+// private key's curve order, the hash will be truncated to that length. It
+// returns the ASN.1 encoded signature. The security of the private key
+// depends on the entropy of rand.
+func SignASN1(rand io.Reader, priv *PrivateKey, hash []byte) ([]byte, error) {
+	return priv.Sign(rand, hash, nil)
 }
 
 // Verify verifies the signature in r, s of hash using the public key, pub. Its
@@ -256,12 +264,8 @@ func Verify(pub *PublicKey, hash []byte, r, s *big.Int) bool {
 		return false
 	}
 	e := hashToInt(hash, c)
-	return verify(pub, c, e, r, s)
-}
 
-func verifyGeneric(pub *PublicKey, c elliptic.Curve, e, r, s *big.Int) bool {
 	var w *big.Int
-	N := c.Params().N
 	if in, ok := c.(invertible); ok {
 		w = in.Inverse(s)
 	} else {
@@ -288,6 +292,24 @@ func verifyGeneric(pub *PublicKey, c elliptic.Curve, e, r, s *big.Int) bool {
 	}
 	x.Mod(x, N)
 	return x.Cmp(r) == 0
+}
+
+// VerifyASN1 verifies the ASN.1 encoded signature, sig, of hash using the
+// public key, pub. Its return value records whether the signature is valid.
+func VerifyASN1(pub *PublicKey, hash, sig []byte) bool {
+	var (
+		r, s  = &big.Int{}, &big.Int{}
+		inner cryptobyte.String
+	)
+	input := cryptobyte.String(sig)
+	if !input.ReadASN1(&inner, asn1.SEQUENCE) ||
+		!input.Empty() ||
+		!inner.ReadASN1Integer(r) ||
+		!inner.ReadASN1Integer(s) ||
+		!inner.Empty() {
+		return false
+	}
+	return Verify(pub, hash, r, s)
 }
 
 type zr struct {

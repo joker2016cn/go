@@ -8,6 +8,7 @@ import (
 	"math"
 
 	"cmd/compile/internal/gc"
+	"cmd/compile/internal/logopt"
 	"cmd/compile/internal/ssa"
 	"cmd/compile/internal/types"
 	"cmd/internal/obj"
@@ -172,6 +173,21 @@ func ssaGenValue(s *gc.SSAGenState, v *ssa.Value) {
 		if r != r1 {
 			p.Reg = r1
 		}
+	case ssa.OpS390XRXSBG:
+		r1 := v.Reg()
+		if r1 != v.Args[0].Reg() {
+			v.Fatalf("input[0] and output not in same register %s", v.LongString())
+		}
+		r2 := v.Args[1].Reg()
+		i := v.Aux.(s390x.RotateParams)
+		p := s.Prog(v.Op.Asm())
+		p.From = obj.Addr{Type: obj.TYPE_CONST, Offset: int64(i.Start)}
+		p.RestArgs = []obj.Addr{
+			{Type: obj.TYPE_CONST, Offset: int64(i.End)},
+			{Type: obj.TYPE_CONST, Offset: int64(i.Amount)},
+			{Type: obj.TYPE_REG, Reg: r2},
+		}
+		p.To = obj.Addr{Type: obj.TYPE_REG, Reg: r1}
 	case ssa.OpS390XADD, ssa.OpS390XADDW,
 		ssa.OpS390XSUB, ssa.OpS390XSUBW,
 		ssa.OpS390XAND, ssa.OpS390XANDW,
@@ -482,6 +498,8 @@ func ssaGenValue(s *gc.SSAGenState, v *ssa.Value) {
 		ssa.OpS390XLDGR, ssa.OpS390XLGDR,
 		ssa.OpS390XCEFBRA, ssa.OpS390XCDFBRA, ssa.OpS390XCEGBRA, ssa.OpS390XCDGBRA,
 		ssa.OpS390XCFEBRA, ssa.OpS390XCFDBRA, ssa.OpS390XCGEBRA, ssa.OpS390XCGDBRA,
+		ssa.OpS390XCELFBR, ssa.OpS390XCDLFBR, ssa.OpS390XCELGBR, ssa.OpS390XCDLGBR,
+		ssa.OpS390XCLFEBR, ssa.OpS390XCLFDBR, ssa.OpS390XCLGEBR, ssa.OpS390XCLGDBR,
 		ssa.OpS390XLDEBR, ssa.OpS390XLEDBR,
 		ssa.OpS390XFNEG, ssa.OpS390XFNEGS,
 		ssa.OpS390XLPDFR, ssa.OpS390XLNDFR:
@@ -601,6 +619,9 @@ func ssaGenValue(s *gc.SSAGenState, v *ssa.Value) {
 		gc.AddAux(&p.From, v)
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = s390x.REGTMP
+		if logopt.Enabled() {
+			logopt.LogOpt(v.Pos, "nilcheck", "genssa", v.Block.Func.Name)
+		}
 		if gc.Debug_checknil != 0 && v.Pos.Line() > 1 { // v.Pos.Line()==1 in generated wrappers
 			gc.Warnl(v.Pos, "generated nil check")
 		}
@@ -725,13 +746,32 @@ func ssaGenValue(s *gc.SSAGenState, v *ssa.Value) {
 		gc.AddAux(&p.From, v)
 		p.To.Type = obj.TYPE_REG
 		p.To.Reg = v.Reg0()
-	case ssa.OpS390XMOVWatomicstore, ssa.OpS390XMOVDatomicstore:
+	case ssa.OpS390XMOVBatomicstore, ssa.OpS390XMOVWatomicstore, ssa.OpS390XMOVDatomicstore:
 		p := s.Prog(v.Op.Asm())
 		p.From.Type = obj.TYPE_REG
 		p.From.Reg = v.Args[1].Reg()
 		p.To.Type = obj.TYPE_MEM
 		p.To.Reg = v.Args[0].Reg()
 		gc.AddAux(&p.To, v)
+	case ssa.OpS390XLANfloor, ssa.OpS390XLAOfloor:
+		r := v.Args[0].Reg() // clobbered, assumed R1 in comments
+
+		// Round ptr down to nearest multiple of 4.
+		// ANDW $~3, R1
+		ptr := s.Prog(s390x.AANDW)
+		ptr.From.Type = obj.TYPE_CONST
+		ptr.From.Offset = 0xfffffffc
+		ptr.To.Type = obj.TYPE_REG
+		ptr.To.Reg = r
+
+		// Redirect output of LA(N|O) into R1 since it is clobbered anyway.
+		// LA(N|O) Rx, R1, 0(R1)
+		op := s.Prog(v.Op.Asm())
+		op.From.Type = obj.TYPE_REG
+		op.From.Reg = v.Args[1].Reg()
+		op.Reg = r
+		op.To.Type = obj.TYPE_MEM
+		op.To.Reg = r
 	case ssa.OpS390XLAA, ssa.OpS390XLAAG:
 		p := s.Prog(v.Op.Asm())
 		p.Reg = v.Reg0()

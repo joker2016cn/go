@@ -27,6 +27,7 @@
 package gc
 
 import (
+	"cmd/compile/internal/logopt"
 	"cmd/compile/internal/types"
 	"cmd/internal/obj"
 	"cmd/internal/src"
@@ -115,10 +116,15 @@ func caninl(fn *Node) {
 	}
 
 	var reason string // reason, if any, that the function was not inlined
-	if Debug['m'] > 1 {
+	if Debug['m'] > 1 || logopt.Enabled() {
 		defer func() {
 			if reason != "" {
-				fmt.Printf("%v: cannot inline %v: %s\n", fn.Line(), fn.Func.Nname, reason)
+				if Debug['m'] > 1 {
+					fmt.Printf("%v: cannot inline %v: %s\n", fn.Line(), fn.Func.Nname, reason)
+				}
+				if logopt.Enabled() {
+					logopt.LogOpt(fn.Pos, "cannotInlineFunction", "inline", fn.funcname(), reason)
+				}
 			}
 		}()
 	}
@@ -132,6 +138,12 @@ func caninl(fn *Node) {
 	// If marked "go:norace" and -race compilation, don't inline.
 	if flag_race && fn.Func.Pragma&Norace != 0 {
 		reason = "marked go:norace with -race compilation"
+		return
+	}
+
+	// If marked "go:nocheckptr" and -d checkptr compilation, don't inline.
+	if Debug_checkptr != 0 && fn.Func.Pragma&NoCheckPtr != 0 {
+		reason = "marked go:nocheckptr"
 		return
 	}
 
@@ -213,9 +225,12 @@ func caninl(fn *Node) {
 	fn.Type.FuncType().Nname = asTypesNode(n)
 
 	if Debug['m'] > 1 {
-		fmt.Printf("%v: can inline %#v as: %#v { %#v }\n", fn.Line(), n, fn.Type, asNodes(n.Func.Inl.Body))
+		fmt.Printf("%v: can inline %#v with cost %d as: %#v { %#v }\n", fn.Line(), n, inlineMaxBudget-visitor.budget, fn.Type, asNodes(n.Func.Inl.Body))
 	} else if Debug['m'] != 0 {
 		fmt.Printf("%v: can inline %v\n", fn.Line(), n)
+	}
+	if logopt.Enabled() {
+		logopt.LogOpt(fn.Pos, "canInlineFunction", "inline", fn.funcname(), fmt.Sprintf("cost: %d", inlineMaxBudget-visitor.budget))
 	}
 }
 
@@ -306,7 +321,7 @@ func (v *hairyVisitor) visit(n *Node) bool {
 		}
 
 		if isIntrinsicCall(n) {
-			v.budget--
+			// Treat like any other node.
 			break
 		}
 
@@ -406,7 +421,7 @@ func (v *hairyVisitor) visit(n *Node) bool {
 	v.budget--
 
 	// When debugging, don't stop early, to get full cost of inlining this function
-	if v.budget < 0 && Debug['m'] < 2 {
+	if v.budget < 0 && Debug['m'] < 2 && !logopt.Enabled() {
 		return true
 	}
 
@@ -655,7 +670,7 @@ func inlnode(n *Node, maxCost int32) *Node {
 					// NB: this check is necessary to prevent indirect re-assignment of the variable
 					// having the address taken after the invocation or only used for reads is actually fine
 					// but we have no easy way to distinguish the safe cases
-					if d.Left.Addrtaken() {
+					if d.Left.Name.Addrtaken() {
 						if Debug['m'] > 1 {
 							fmt.Printf("%v: cannot inline escaping closure variable %v\n", n.Line(), n.Left)
 						}
@@ -820,11 +835,18 @@ func mkinlcall(n, fn *Node, maxCost int32) *Node {
 	if fn.Func.Inl.Cost > maxCost {
 		// The inlined function body is too big. Typically we use this check to restrict
 		// inlining into very big functions.  See issue 26546 and 17566.
+		if logopt.Enabled() {
+			logopt.LogOpt(n.Pos, "cannotInlineCall", "inline", Curfn.funcname(),
+				fmt.Sprintf("cost %d of %s exceeds max large caller cost %d", fn.Func.Inl.Cost, fn.pkgFuncName(), maxCost))
+		}
 		return n
 	}
 
 	if fn == Curfn || fn.Name.Defn == Curfn {
 		// Can't recursively inline a function into itself.
+		if logopt.Enabled() {
+			logopt.LogOpt(n.Pos, "cannotInlineCall", "inline", fmt.Sprintf("recursive call to %s", Curfn.funcname()))
+		}
 		return n
 	}
 
@@ -850,6 +872,9 @@ func mkinlcall(n, fn *Node, maxCost int32) *Node {
 	}
 	if Debug['m'] > 2 {
 		fmt.Printf("%v: Before inlining: %+v\n", n.Line(), n)
+	}
+	if logopt.Enabled() {
+		logopt.LogOpt(n.Pos, "inlineCall", "inline", Curfn.funcname(), fn.pkgFuncName())
 	}
 
 	if ssaDump != "" && ssaDump == Curfn.funcname() {
@@ -919,9 +944,9 @@ func mkinlcall(n, fn *Node, maxCost int32) *Node {
 		if genDwarfInline > 0 {
 			inlf := inlvars[ln]
 			if ln.Class() == PPARAM {
-				inlf.SetInlFormal(true)
+				inlf.Name.SetInlFormal(true)
 			} else {
-				inlf.SetInlLocal(true)
+				inlf.Name.SetInlLocal(true)
 			}
 			inlf.Pos = ln.Pos
 			inlfvars = append(inlfvars, inlf)
@@ -947,7 +972,7 @@ func mkinlcall(n, fn *Node, maxCost int32) *Node {
 			// was manufactured by the inliner (e.g. "~R2"); such vars
 			// were not part of the original callee.
 			if !strings.HasPrefix(m.Sym.Name, "~R") {
-				m.SetInlFormal(true)
+				m.Name.SetInlFormal(true)
 				m.Pos = mpos
 				inlfvars = append(inlfvars, m)
 			}
@@ -1125,7 +1150,7 @@ func inlvar(var_ *Node) *Node {
 	n.SetClass(PAUTO)
 	n.Name.SetUsed(true)
 	n.Name.Curfn = Curfn // the calling function, not the called one
-	n.SetAddrtaken(var_.Addrtaken())
+	n.Name.SetAddrtaken(var_.Name.Addrtaken())
 
 	Curfn.Func.Dcl = append(Curfn.Func.Dcl, n)
 	return n

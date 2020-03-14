@@ -37,6 +37,8 @@ func TestIntendedInlining(t *testing.T) {
 			"addb",
 			"adjustpanics",
 			"adjustpointer",
+			"alignDown",
+			"alignUp",
 			"bucketMask",
 			"bucketShift",
 			"chanbuf",
@@ -56,7 +58,6 @@ func TestIntendedInlining(t *testing.T) {
 			"readUnaligned32",
 			"readUnaligned64",
 			"releasem",
-			"round",
 			"roundupsize",
 			"stackmapdata",
 			"stringStructOf",
@@ -174,7 +175,7 @@ func TestIntendedInlining(t *testing.T) {
 	}
 
 	switch runtime.GOARCH {
-	case "386", "wasm", "arm":
+	case "386", "wasm", "arm", "riscv64":
 	default:
 		// TODO(mvdan): As explained in /test/inline_sync.go, some
 		// architectures don't have atomic intrinsics, so these go over

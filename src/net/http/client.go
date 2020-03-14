@@ -240,7 +240,7 @@ func send(ireq *Request, rt RoundTripper, deadline time.Time) (resp *Response, d
 		username := u.Username()
 		password, _ := u.Password()
 		forkReq()
-		req.Header = ireq.Header.Clone()
+		req.Header = cloneOrMakeHeader(ireq.Header)
 		req.Header.Set("Authorization", "Basic "+basicAuth(username, password))
 	}
 
@@ -265,6 +265,12 @@ func send(ireq *Request, rt RoundTripper, deadline time.Time) (resp *Response, d
 		}
 		return nil, didTimeout, err
 	}
+	if resp == nil {
+		return nil, didTimeout, fmt.Errorf("http: RoundTripper implementation (%T) returned a nil *Response with a nil error", rt)
+	}
+	if resp.Body == nil {
+		return nil, didTimeout, fmt.Errorf("http: RoundTripper implementation (%T) returned a *Response with a nil Body", rt)
+	}
 	if !deadline.IsZero() {
 		resp.Body = &cancelTimerBody{
 			stop:          stopTimer,
@@ -288,10 +294,17 @@ func timeBeforeContextDeadline(t time.Time, ctx context.Context) bool {
 
 // knownRoundTripperImpl reports whether rt is a RoundTripper that's
 // maintained by the Go team and known to implement the latest
-// optional semantics (notably contexts).
-func knownRoundTripperImpl(rt RoundTripper) bool {
-	switch rt.(type) {
-	case *Transport, *http2Transport:
+// optional semantics (notably contexts). The Request is used
+// to check whether this particular request is using an alternate protocol,
+// in which case we need to check the RoundTripper for that protocol.
+func knownRoundTripperImpl(rt RoundTripper, req *Request) bool {
+	switch t := rt.(type) {
+	case *Transport:
+		if altRT := t.alternateRoundTripper(req); altRT != nil {
+			return knownRoundTripperImpl(altRT, req)
+		}
+		return true
+	case *http2Transport, http2noDialH2RoundTripper:
 		return true
 	}
 	// There's a very minor chance of a false positive with this.
@@ -319,7 +332,7 @@ func setRequestCancel(req *Request, rt RoundTripper, deadline time.Time) (stopTi
 	if deadline.IsZero() {
 		return nop, alwaysFalse
 	}
-	knownTransport := knownRoundTripperImpl(rt)
+	knownTransport := knownRoundTripperImpl(rt, req)
 	oldCtx := req.Context()
 
 	if req.Cancel == nil && knownTransport {
@@ -434,8 +447,8 @@ func Get(url string) (resp *Response, err error) {
 // An error is returned if the Client's CheckRedirect function fails
 // or if there was an HTTP protocol error. A non-2xx response doesn't
 // cause an error. Any returned error will be of type *url.Error. The
-// url.Error value's Timeout method will report true if request timed
-// out or was canceled.
+// url.Error value's Timeout method will report true if the request
+// timed out.
 //
 // When err is nil, resp always contains a non-nil resp.Body.
 // Caller should close resp.Body when done reading from it.
@@ -719,7 +732,7 @@ func (c *Client) makeHeadersCopier(ireq *Request) func(*Request) {
 	// The headers to copy are from the very initial request.
 	// We use a closured callback to keep a reference to these original headers.
 	var (
-		ireqhdr  = ireq.Header.Clone()
+		ireqhdr  = cloneOrMakeHeader(ireq.Header)
 		icookies map[string][]*Cookie
 	)
 	if c.Jar != nil && ireq.Header.Get("Cookie") != "" {

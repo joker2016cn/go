@@ -206,8 +206,15 @@ func (b *Builder) buildActionID(a *Action) cache.ActionID {
 	// The compiler hides the exact value of $GOROOT
 	// when building things in GOROOT.
 	// Assume b.WorkDir is being trimmed properly.
+	// When -trimpath is used with a package built from the module cache,
+	// use the module path and version instead of the directory.
 	if !p.Goroot && !cfg.BuildTrimpath && !strings.HasPrefix(p.Dir, b.WorkDir) {
 		fmt.Fprintf(h, "dir %s\n", p.Dir)
+	} else if cfg.BuildTrimpath && p.Module != nil {
+		fmt.Fprintf(h, "module %s@%s\n", p.Module.Path, p.Module.Version)
+	}
+	if p.Module != nil {
+		fmt.Fprintf(h, "go %s\n", p.Module.GoVersion)
 	}
 	fmt.Fprintf(h, "goos %s goarch %s\n", cfg.Goos, cfg.Goarch)
 	fmt.Fprintf(h, "import %q\n", p.ImportPath)
@@ -395,7 +402,7 @@ func (b *Builder) build(a *Action) (err error) {
 		bit(needCompiledGoFiles, b.NeedCompiledGoFiles)
 
 	if !p.BinaryOnly {
-		if b.useCache(a, p, b.buildActionID(a), p.Target) {
+		if b.useCache(a, b.buildActionID(a), p.Target) {
 			// We found the main output in the cache.
 			// If we don't need any other outputs, we can stop.
 			// Otherwise, we need to write files to a.Objdir (needVet, needCgoHdr).
@@ -433,7 +440,7 @@ func (b *Builder) build(a *Action) (err error) {
 			err = fmt.Errorf("go build %s: %v", a.Package.ImportPath, err)
 		}
 		if err != nil && b.IsCmdList && b.NeedError && p.Error == nil {
-			p.Error = &load.PackageError{Err: err.Error()}
+			p.Error = &load.PackageError{Err: err}
 		}
 	}()
 	if cfg.BuildN {
@@ -1023,7 +1030,7 @@ func (b *Builder) vet(a *Action) error {
 	// dependency tree turn on *more* analysis, as here.
 	// (The unsafeptr check does not write any facts for use by
 	// later vet runs.)
-	if a.Package.Goroot && !VetExplicit {
+	if a.Package.Goroot && !VetExplicit && VetTool == "" {
 		// Note that $GOROOT/src/buildall.bash
 		// does the same for the misc-compile trybots
 		// and should be updated if these flags are
@@ -1171,7 +1178,7 @@ func (b *Builder) printLinkerConfig(h io.Writer, p *load.Package) {
 // link is the action for linking a single command.
 // Note that any new influence on this logic must be reported in b.linkActionID above as well.
 func (b *Builder) link(a *Action) (err error) {
-	if b.useCache(a, a.Package, b.linkActionID(a), a.Package.Target) || b.IsCmdList {
+	if b.useCache(a, b.linkActionID(a), a.Package.Target) || b.IsCmdList {
 		return nil
 	}
 	defer b.flushOutput(a)
@@ -1404,7 +1411,7 @@ func (b *Builder) linkSharedActionID(a *Action) cache.ActionID {
 }
 
 func (b *Builder) linkShared(a *Action) (err error) {
-	if b.useCache(a, nil, b.linkSharedActionID(a), a.Target) || b.IsCmdList {
+	if b.useCache(a, b.linkSharedActionID(a), a.Target) || b.IsCmdList {
 		return nil
 	}
 	defer b.flushOutput(a)
@@ -1610,12 +1617,12 @@ func (b *Builder) copyFile(dst, src string, perm os.FileMode, force bool) error 
 
 	// Be careful about removing/overwriting dst.
 	// Do not remove/overwrite if dst exists and is a directory
-	// or a non-object file.
+	// or a non-empty non-object file.
 	if fi, err := os.Stat(dst); err == nil {
 		if fi.IsDir() {
 			return fmt.Errorf("build output %q already exists and is a directory", dst)
 		}
-		if !force && fi.Mode().IsRegular() && !isObject(dst) {
+		if !force && fi.Mode().IsRegular() && fi.Size() != 0 && !isObject(dst) {
 			return fmt.Errorf("build output %q already exists and is not an object file", dst)
 		}
 	}
@@ -1770,6 +1777,11 @@ func (b *Builder) fmtcmd(dir string, format string, args ...interface{}) string 
 	}
 	if b.WorkDir != "" {
 		cmd = strings.ReplaceAll(cmd, b.WorkDir, "$WORK")
+		escaped := strconv.Quote(b.WorkDir)
+		escaped = escaped[1 : len(escaped)-1] // strip quote characters
+		if escaped != b.WorkDir {
+			cmd = strings.ReplaceAll(cmd, escaped, "$WORK")
+		}
 	}
 	return cmd
 }
@@ -2120,9 +2132,8 @@ func (b *Builder) gfortran(a *Action, p *load.Package, workdir, out string, flag
 func (b *Builder) ccompile(a *Action, p *load.Package, outfile string, flags []string, file string, compiler []string) error {
 	file = mkAbs(p.Dir, file)
 	desc := p.ImportPath
-	if !filepath.IsAbs(outfile) {
-		outfile = filepath.Join(p.Dir, outfile)
-	}
+	outfile = mkAbs(p.Dir, outfile)
+
 	output, err := b.runOut(a, filepath.Dir(file), b.cCompilerEnv(), compiler, flags, "-o", outfile, "-c", filepath.Base(file))
 	if len(output) > 0 {
 		// On FreeBSD 11, when we pass -g to clang 3.8 it
@@ -2390,7 +2401,7 @@ func (b *Builder) gccArchArgs() []string {
 	switch cfg.Goarch {
 	case "386":
 		return []string{"-m32"}
-	case "amd64", "amd64p32":
+	case "amd64":
 		return []string{"-m64"}
 	case "arm":
 		return []string{"-marm"} // not thumb

@@ -170,11 +170,28 @@ func mayAffectMemory(n *Node) bool {
 }
 
 func mustHeapAlloc(n *Node) bool {
-	// TODO(mdempsky): Cleanup this mess.
-	return n.Type != nil &&
-		(n.Type.Width > maxStackVarSize ||
-			(n.Op == ONEW || n.Op == OPTRLIT) && n.Type.Elem().Width >= maxImplicitStackVarSize ||
-			n.Op == OMAKESLICE && !isSmallMakeSlice(n))
+	if n.Type == nil {
+		return false
+	}
+
+	// Parameters are always passed via the stack.
+	if n.Op == ONAME && (n.Class() == PPARAM || n.Class() == PPARAMOUT) {
+		return false
+	}
+
+	if n.Type.Width > maxStackVarSize {
+		return true
+	}
+
+	if (n.Op == ONEW || n.Op == OPTRLIT) && n.Type.Elem().Width >= maxImplicitStackVarSize {
+		return true
+	}
+
+	if n.Op == OMAKESLICE && !isSmallMakeSlice(n) {
+		return true
+	}
+
+	return false
 }
 
 // addrescapes tags node n as having had its address taken
@@ -201,7 +218,7 @@ func addrescapes(n *Node) {
 		}
 
 		// If a closure reference escapes, mark the outer variable as escaping.
-		if n.IsClosureVar() {
+		if n.Name.IsClosureVar() {
 			addrescapes(n.Name.Defn)
 			break
 		}
@@ -251,7 +268,7 @@ func moveToHeap(n *Node) {
 		Dump("MOVE", n)
 	}
 	if compiling_runtime {
-		yyerror("%v escapes to heap, not allowed in runtime.", n)
+		yyerror("%v escapes to heap, not allowed in runtime", n)
 	}
 	if n.Class() == PAUTOHEAP {
 		Dump("n", n)
@@ -283,7 +300,6 @@ func moveToHeap(n *Node) {
 		// and substitute that copy into the function declaration list
 		// so that analyses of the local (on-stack) variables use it.
 		stackcopy := newname(n.Sym)
-		stackcopy.SetAddable(false)
 		stackcopy.Type = n.Type
 		stackcopy.Xoffset = n.Xoffset
 		stackcopy.SetClass(n.Class())
@@ -294,7 +310,7 @@ func moveToHeap(n *Node) {
 			// Thus, we need the pointer to the heap copy always available so the
 			// post-deferreturn code can copy the return value back to the stack.
 			// See issue 16095.
-			heapaddr.SetIsOutputParamHeapAddr(true)
+			heapaddr.Name.SetIsOutputParamHeapAddr(true)
 		}
 		n.Name.Param.Stackcopy = stackcopy
 

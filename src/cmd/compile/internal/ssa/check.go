@@ -141,14 +141,22 @@ func checkFunc(f *Func) {
 					f.Fatalf("bad int32 AuxInt value for %v", v)
 				}
 				canHaveAuxInt = true
-			case auxInt64, auxFloat64:
+			case auxInt64, auxARM64BitField:
 				canHaveAuxInt = true
 			case auxInt128:
 				// AuxInt must be zero, so leave canHaveAuxInt set to false.
 			case auxFloat32:
 				canHaveAuxInt = true
+				if math.IsNaN(v.AuxFloat()) {
+					f.Fatalf("value %v has an AuxInt that encodes a NaN", v)
+				}
 				if !isExactFloat32(v.AuxFloat()) {
 					f.Fatalf("value %v has an AuxInt value that is not an exact float32", v)
+				}
+			case auxFloat64:
+				canHaveAuxInt = true
+				if math.IsNaN(v.AuxFloat()) {
+					f.Fatalf("value %v has an AuxInt that encodes a NaN", v)
 				}
 			case auxString, auxSym, auxTyp, auxArchSpecific:
 				canHaveAux = true
@@ -284,7 +292,7 @@ func checkFunc(f *Func) {
 	if f.RegAlloc == nil {
 		// Note: regalloc introduces non-dominating args.
 		// See TODO in regalloc.go.
-		sdom := f.sdom()
+		sdom := f.Sdom()
 		for _, b := range f.Blocks {
 			for _, v := range b.Values {
 				for i, arg := range v.Args {
@@ -500,11 +508,11 @@ func memCheck(f *Func) {
 
 // domCheck reports whether x dominates y (including x==y).
 func domCheck(f *Func, sdom SparseTree, x, y *Block) bool {
-	if !sdom.isAncestorEq(f.Entry, y) {
+	if !sdom.IsAncestorEq(f.Entry, y) {
 		// unreachable - ignore
 		return true
 	}
-	return sdom.isAncestorEq(x, y)
+	return sdom.IsAncestorEq(x, y)
 }
 
 // isExactFloat32 reports whether x can be exactly represented as a float32.

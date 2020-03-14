@@ -27,13 +27,17 @@ func rename(oldname, newname string) error {
 		// At this point we've determined the newname is bad.
 		// But just in case oldname is also bad, prioritize returning
 		// the oldname error because that's what we did historically.
-		if _, err := Lstat(oldname); err != nil {
+		// However, if the old name and new name are not the same, yet
+		// they refer to the same file, it implies a case-only
+		// rename on a case-insensitive filesystem, which is ok.
+		if ofi, err := Lstat(oldname); err != nil {
 			if pe, ok := err.(*PathError); ok {
 				err = pe.Err
 			}
 			return &LinkError{"rename", oldname, newname, err}
+		} else if newname == oldname || !SameFile(fi, ofi) {
+			return &LinkError{"rename", oldname, newname, syscall.EEXIST}
 		}
-		return &LinkError{"rename", oldname, newname, syscall.EEXIST}
 	}
 	err = syscall.Rename(oldname, newname)
 	if err != nil {
@@ -291,6 +295,12 @@ func (f *File) pwrite(b []byte, off int64) (n int, err error) {
 // relative to the current offset, and 2 means relative to the end.
 // It returns the new offset and an error, if any.
 func (f *File) seek(offset int64, whence int) (ret int64, err error) {
+	if f.dirinfo != nil {
+		// Free cached dirinfo, so we allocate a new one if we
+		// access this file as a directory again. See #35767 and #37161.
+		f.dirinfo.close()
+		f.dirinfo = nil
+	}
 	ret, err = f.pfd.Seek(offset, whence)
 	runtime.KeepAlive(f)
 	return ret, err

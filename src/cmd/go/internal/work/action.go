@@ -41,7 +41,7 @@ type Builder struct {
 	IsCmdList           bool // running as part of go list; set p.Stale and additional fields below
 	NeedError           bool // list needs p.Error
 	NeedExport          bool // list needs p.Export
-	NeedCompiledGoFiles bool // list needs p.CompiledGoFIles
+	NeedCompiledGoFiles bool // list needs p.CompiledGoFiles
 
 	objdirSeq int // counter for NewObjdir
 	pkgSeq    int
@@ -290,11 +290,12 @@ func (b *Builder) Init() {
 		}
 	}
 
-	if _, ok := cfg.OSArchSupportsCgo[cfg.Goos+"/"+cfg.Goarch]; !ok && cfg.BuildContext.Compiler == "gc" {
-		fmt.Fprintf(os.Stderr, "cmd/go: unsupported GOOS/GOARCH pair %s/%s\n", cfg.Goos, cfg.Goarch)
+	if err := CheckGOOSARCHPair(cfg.Goos, cfg.Goarch); err != nil {
+		fmt.Fprintf(os.Stderr, "cmd/go: %v\n", err)
 		base.SetExitStatus(2)
 		base.Exit()
 	}
+
 	for _, tag := range cfg.BuildContext.BuildTags {
 		if strings.Contains(tag, ",") {
 			fmt.Fprintf(os.Stderr, "cmd/go: -tags space-separated list contains comma\n")
@@ -302,6 +303,13 @@ func (b *Builder) Init() {
 			base.Exit()
 		}
 	}
+}
+
+func CheckGOOSARCHPair(goos, goarch string) error {
+	if _, ok := cfg.OSArchSupportsCgo[goos+"/"+goarch]; !ok && cfg.BuildContext.Compiler == "gc" {
+		return fmt.Errorf("unsupported GOOS/GOARCH pair %s/%s", goos, goarch)
+	}
+	return nil
 }
 
 // NewObjdir returns the name of a fresh object directory under b.WorkDir.

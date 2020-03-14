@@ -164,7 +164,8 @@ type factsTable struct {
 	// order is a couple of partial order sets that record information
 	// about relations between SSA values in the signed and unsigned
 	// domain.
-	order [2]*poset
+	orderS *poset
+	orderU *poset
 
 	// known lower and upper bounds on individual values.
 	limits     map[ID]limit
@@ -187,10 +188,10 @@ var checkpointBound = limitFact{}
 
 func newFactsTable(f *Func) *factsTable {
 	ft := &factsTable{}
-	ft.order[0] = f.newPoset() // signed
-	ft.order[1] = f.newPoset() // unsigned
-	ft.order[0].SetUnsigned(false)
-	ft.order[1].SetUnsigned(true)
+	ft.orderS = f.newPoset()
+	ft.orderU = f.newPoset()
+	ft.orderS.SetUnsigned(false)
+	ft.orderU.SetUnsigned(true)
 	ft.facts = make(map[pair]relation)
 	ft.stack = make([]fact, 4)
 	ft.limits = make(map[ID]limit)
@@ -221,23 +222,23 @@ func (ft *factsTable) update(parent *Block, v, w *Value, d domain, r relation) {
 
 	if d == signed || d == unsigned {
 		var ok bool
-		idx := 0
+		order := ft.orderS
 		if d == unsigned {
-			idx = 1
+			order = ft.orderU
 		}
 		switch r {
 		case lt:
-			ok = ft.order[idx].SetOrder(v, w)
+			ok = order.SetOrder(v, w)
 		case gt:
-			ok = ft.order[idx].SetOrder(w, v)
+			ok = order.SetOrder(w, v)
 		case lt | eq:
-			ok = ft.order[idx].SetOrderOrEqual(v, w)
+			ok = order.SetOrderOrEqual(v, w)
 		case gt | eq:
-			ok = ft.order[idx].SetOrderOrEqual(w, v)
+			ok = order.SetOrderOrEqual(w, v)
 		case eq:
-			ok = ft.order[idx].SetEqual(v, w)
+			ok = order.SetEqual(v, w)
 		case lt | gt:
-			ok = ft.order[idx].SetNonEqual(v, w)
+			ok = order.SetNonEqual(v, w)
 		default:
 			panic("unknown relation")
 		}
@@ -588,6 +589,7 @@ func (ft *factsTable) isNonNegative(v *Value) bool {
 	}
 
 	// Check if the recorded limits can prove that the value is positive
+
 	if l, has := ft.limits[v.ID]; has && (l.min >= 0 || l.umax <= uint64(max)) {
 		return true
 	}
@@ -610,7 +612,7 @@ func (ft *factsTable) isNonNegative(v *Value) bool {
 	}
 
 	// Check if the signed poset can prove that the value is >= 0
-	return ft.order[0].OrderedOrEqual(ft.zero, v)
+	return ft.orderS.OrderedOrEqual(ft.zero, v)
 }
 
 // checkpoint saves the current state of known relations.
@@ -621,8 +623,8 @@ func (ft *factsTable) checkpoint() {
 	}
 	ft.stack = append(ft.stack, checkpointFact)
 	ft.limitStack = append(ft.limitStack, checkpointBound)
-	ft.order[0].Checkpoint()
-	ft.order[1].Checkpoint()
+	ft.orderS.Checkpoint()
+	ft.orderU.Checkpoint()
 }
 
 // restore restores known relation to the state just
@@ -658,8 +660,8 @@ func (ft *factsTable) restore() {
 			ft.limits[old.vid] = old.limit
 		}
 	}
-	ft.order[0].Undo()
-	ft.order[1].Undo()
+	ft.orderS.Undo()
+	ft.orderU.Undo()
 }
 
 func lessByID(v, w *Value) bool {
@@ -715,24 +717,6 @@ var (
 		OpLeq32U: {unsigned, lt | eq},
 		OpLeq64:  {signed, lt | eq},
 		OpLeq64U: {unsigned, lt | eq},
-
-		OpGeq8:   {signed, eq | gt},
-		OpGeq8U:  {unsigned, eq | gt},
-		OpGeq16:  {signed, eq | gt},
-		OpGeq16U: {unsigned, eq | gt},
-		OpGeq32:  {signed, eq | gt},
-		OpGeq32U: {unsigned, eq | gt},
-		OpGeq64:  {signed, eq | gt},
-		OpGeq64U: {unsigned, eq | gt},
-
-		OpGreater8:   {signed, gt},
-		OpGreater8U:  {unsigned, gt},
-		OpGreater16:  {signed, gt},
-		OpGreater16U: {unsigned, gt},
-		OpGreater32:  {signed, gt},
-		OpGreater32U: {unsigned, gt},
-		OpGreater64:  {signed, gt},
-		OpGreater64U: {unsigned, gt},
 
 		// For these ops, the negative branch is different: we can only
 		// prove signed/GE (signed/GT) if we can prove that arg0 is non-negative.
@@ -846,7 +830,7 @@ func prove(f *Func) {
 	})
 
 	idom := f.Idom()
-	sdom := f.sdom()
+	sdom := f.Sdom()
 
 	// DFS on the dominator tree.
 	//
@@ -922,7 +906,7 @@ func prove(f *Func) {
 	ft.restore()
 
 	// Return the posets to the free list
-	for _, po := range ft.order {
+	for _, po := range []*poset{ft.orderS, ft.orderU} {
 		// Make sure it's empty as it should be. A non-empty poset
 		// might cause errors and miscompilations if reused.
 		if checkEnabled {
@@ -946,10 +930,10 @@ func getBranch(sdom SparseTree, p *Block, b *Block) branch {
 	// has one predecessor then (apart from the degenerate case),
 	// there is no path from entry that can reach b through p.Succs[1].
 	// TODO: how about p->yes->b->yes, i.e. a loop in yes.
-	if sdom.isAncestorEq(p.Succs[0].b, b) && len(p.Succs[0].b.Preds) == 1 {
+	if sdom.IsAncestorEq(p.Succs[0].b, b) && len(p.Succs[0].b.Preds) == 1 {
 		return positive
 	}
-	if sdom.isAncestorEq(p.Succs[1].b, b) && len(p.Succs[1].b.Preds) == 1 {
+	if sdom.IsAncestorEq(p.Succs[1].b, b) && len(p.Succs[1].b.Preds) == 1 {
 		return negative
 	}
 	return unknown
@@ -1235,15 +1219,23 @@ func simplifyBlock(sdom SparseTree, ft *factsTable, b *Block) {
 		case OpDiv16, OpDiv32, OpDiv64, OpMod16, OpMod32, OpMod64:
 			// On amd64 and 386 fix-up code can be avoided if we know
 			//  the divisor is not -1 or the dividend > MinIntNN.
+			// Don't modify AuxInt on other architectures,
+			// as that can interfere with CSE.
+			// TODO: add other architectures?
+			if b.Func.Config.arch != "386" && b.Func.Config.arch != "amd64" {
+				break
+			}
 			divr := v.Args[1]
 			divrLim, divrLimok := ft.limits[divr.ID]
 			divd := v.Args[0]
 			divdLim, divdLimok := ft.limits[divd.ID]
 			if (divrLimok && (divrLim.max < -1 || divrLim.min > -1)) ||
 				(divdLimok && divdLim.min > mostNegativeDividend[v.Op]) {
-				v.AuxInt = 1 // see NeedsFixUp in genericOps - v.AuxInt = 0 means we have not proved
-				// that the divisor is not -1 and the dividend is not the most negative,
-				// so we need to add fix-up code.
+				// See DivisionNeedsFixUp in rewrite.go.
+				// v.AuxInt = 1 means we have proved both that the divisor is not -1
+				// and that the dividend is not the most negative integer,
+				// so we do not need to add fix-up code.
+				v.AuxInt = 1
 				if b.Func.pass.debug > 0 {
 					b.Func.Warnl(v.Pos, "Proved %v does not need fix-up", v.Op)
 				}
@@ -1310,6 +1302,13 @@ func removeBranch(b *Block, branch branch) {
 
 // isNonNegative reports whether v is known to be greater or equal to zero.
 func isNonNegative(v *Value) bool {
+	if !v.Type.IsInteger() {
+		panic("isNonNegative bad type")
+	}
+	// TODO: return true if !v.Type.IsSigned()
+	// SSA isn't type-safe enough to do that now (issue 37753).
+	// The checks below depend only on the pattern of bits.
+
 	switch v.Op {
 	case OpConst64:
 		return v.AuxInt >= 0
@@ -1317,16 +1316,37 @@ func isNonNegative(v *Value) bool {
 	case OpConst32:
 		return int32(v.AuxInt) >= 0
 
+	case OpConst16:
+		return int16(v.AuxInt) >= 0
+
+	case OpConst8:
+		return int8(v.AuxInt) >= 0
+
 	case OpStringLen, OpSliceLen, OpSliceCap,
-		OpZeroExt8to64, OpZeroExt16to64, OpZeroExt32to64:
+		OpZeroExt8to64, OpZeroExt16to64, OpZeroExt32to64,
+		OpZeroExt8to32, OpZeroExt16to32, OpZeroExt8to16,
+		OpCtz64, OpCtz32, OpCtz16, OpCtz8:
 		return true
 
-	case OpRsh64Ux64:
+	case OpRsh64Ux64, OpRsh32Ux64:
 		by := v.Args[1]
 		return by.Op == OpConst64 && by.AuxInt > 0
 
-	case OpRsh64x64:
+	case OpRsh64x64, OpRsh32x64, OpRsh8x64, OpRsh16x64, OpRsh32x32, OpRsh64x32,
+		OpSignExt32to64, OpSignExt16to64, OpSignExt8to64, OpSignExt16to32, OpSignExt8to32:
 		return isNonNegative(v.Args[0])
+
+	case OpAnd64, OpAnd32, OpAnd16, OpAnd8:
+		return isNonNegative(v.Args[0]) || isNonNegative(v.Args[1])
+
+	case OpMod64, OpMod32, OpMod16, OpMod8,
+		OpDiv64, OpDiv32, OpDiv16, OpDiv8,
+		OpOr64, OpOr32, OpOr16, OpOr8,
+		OpXor64, OpXor32, OpXor16, OpXor8:
+		return isNonNegative(v.Args[0]) && isNonNegative(v.Args[1])
+
+		// We could handle OpPhi here, but the improvements from doing
+		// so are very minor, and it is neither simple nor cheap.
 	}
 	return false
 }

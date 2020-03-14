@@ -202,25 +202,9 @@ var genericOps = []opData{
 	{name: "Leq32F", argLength: 2, typ: "Bool"},
 	{name: "Leq64F", argLength: 2, typ: "Bool"},
 
-	{name: "Greater8", argLength: 2, typ: "Bool"},  // arg0 > arg1, signed
-	{name: "Greater8U", argLength: 2, typ: "Bool"}, // arg0 > arg1, unsigned
-	{name: "Greater16", argLength: 2, typ: "Bool"},
-	{name: "Greater16U", argLength: 2, typ: "Bool"},
-	{name: "Greater32", argLength: 2, typ: "Bool"},
-	{name: "Greater32U", argLength: 2, typ: "Bool"},
-	{name: "Greater64", argLength: 2, typ: "Bool"},
-	{name: "Greater64U", argLength: 2, typ: "Bool"},
 	{name: "Greater32F", argLength: 2, typ: "Bool"},
 	{name: "Greater64F", argLength: 2, typ: "Bool"},
 
-	{name: "Geq8", argLength: 2, typ: "Bool"},  // arg0 <= arg1, signed
-	{name: "Geq8U", argLength: 2, typ: "Bool"}, // arg0 <= arg1, unsigned
-	{name: "Geq16", argLength: 2, typ: "Bool"},
-	{name: "Geq16U", argLength: 2, typ: "Bool"},
-	{name: "Geq32", argLength: 2, typ: "Bool"},
-	{name: "Geq32U", argLength: 2, typ: "Bool"},
-	{name: "Geq64", argLength: 2, typ: "Bool"},
-	{name: "Geq64U", argLength: 2, typ: "Bool"},
 	{name: "Geq32F", argLength: 2, typ: "Bool"},
 	{name: "Geq64F", argLength: 2, typ: "Bool"},
 
@@ -302,8 +286,21 @@ var genericOps = []opData{
 	{name: "Abs", argLength: 1},      // absolute value arg0
 	{name: "Copysign", argLength: 2}, // copy sign from arg0 to arg1
 
-	// Data movement, max argument length for Phi is indefinite so just pick
-	// a really large number
+	// 3-input opcode.
+	// Fused-multiply-add, float64 only.
+	// When a*b+c is exactly zero (before rounding), then the result is +0 or -0.
+	// The 0's sign is determined according to the standard rules for the
+	// addition (-0 if both a*b and c are -0, +0 otherwise).
+	//
+	// Otherwise, when a*b+c rounds to zero, then the resulting 0's sign is
+	// determined by the sign of the exact result a*b+c.
+	// See section 6.3 in ieee754.
+	//
+	// When the multiply is an infinity times a zero, the result is NaN.
+	// See section 7.2 in ieee754.
+	{name: "FMA", argLength: 3}, // compute (a*b)+c without intermediate rounding
+
+	// Data movement. Max argument length for Phi is indefinite.
 	{name: "Phi", argLength: -1, zeroWidth: true}, // select an argument based on which predecessor block we came from
 	{name: "Copy", argLength: 1},                  // output = arg0
 	// Convert converts between pointers and integers.
@@ -326,8 +323,13 @@ var genericOps = []opData{
 	{name: "Const32", aux: "Int32"},      // auxint is sign-extended 32 bits
 	// Note: ConstX are sign-extended even when the type of the value is unsigned.
 	// For instance, uint8(0xaa) is stored as auxint=0xffffffffffffffaa.
-	{name: "Const64", aux: "Int64"},    // value is auxint
-	{name: "Const32F", aux: "Float32"}, // value is math.Float64frombits(uint64(auxint)) and is exactly prepresentable as float 32
+	{name: "Const64", aux: "Int64"}, // value is auxint
+	// Note: for both Const32F and Const64F, we disallow encoding NaNs.
+	// Signaling NaNs are tricky because if you do anything with them, they become quiet.
+	// Particularly, converting a 32 bit sNaN to 64 bit and back converts it to a qNaN.
+	// See issue 36399 and 36400.
+	// Encodings of +inf, -inf, and -0 are fine.
+	{name: "Const32F", aux: "Float32"}, // value is math.Float64frombits(uint64(auxint)) and is exactly representable as float 32
 	{name: "Const64F", aux: "Float64"}, // value is math.Float64frombits(uint64(auxint))
 	{name: "ConstInterface"},           // nil interface
 	{name: "ConstSlice"},               // nil slice
@@ -354,6 +356,13 @@ var genericOps = []opData{
 	// The source and destination of Move may overlap in some cases. See e.g.
 	// memmove inlining in generic.rules. When inlineablememmovesize (in ../rewrite.go)
 	// returns true, we must do all loads before all stores, when lowering Move.
+	// The type of Move is used for the write barrier pass to insert write barriers
+	// and for alignment on some architectures.
+	// For pointerless types, it is possible for the type to be inaccurate.
+	// For type alignment and pointer information, use the type in Aux;
+	// for type size, use the size in AuxInt.
+	// The "inline runtime.memmove" rewrite rule generates Moves with inaccurate types,
+	// such as type byte instead of the more accurate type [8]byte.
 	{name: "Move", argLength: 3, typ: "Mem", aux: "TypSize"}, // arg0=destptr, arg1=srcptr, arg2=mem, auxint=size, aux=type.  Returns memory.
 	{name: "Zero", argLength: 2, typ: "Mem", aux: "TypSize"}, // arg0=destptr, arg1=mem, auxint=size, aux=type. Returns memory.
 
@@ -414,6 +423,7 @@ var genericOps = []opData{
 	{name: "Cvt64Fto64", argLength: 1},
 	{name: "Cvt32Fto64F", argLength: 1},
 	{name: "Cvt64Fto32F", argLength: 1},
+	{name: "CvtBoolToUint8", argLength: 1},
 
 	// Force rounding to precision of type.
 	{name: "Round32F", argLength: 1},
@@ -510,6 +520,9 @@ var genericOps = []opData{
 	{name: "Zeromask", argLength: 1, typ: "UInt32"}, // 0 if arg0 == 0, 0xffffffff if arg0 != 0
 	{name: "Slicemask", argLength: 1},               // 0 if arg0 == 0, -1 if arg0 > 0, undef if arg0<0. Type is native int size.
 
+	{name: "SpectreIndex", argLength: 2},      // arg0 if 0 <= arg0 < arg1, 0 otherwise. Type is native int size.
+	{name: "SpectreSliceIndex", argLength: 2}, // arg0 if 0 <= arg0 <= arg1, 0 otherwise. Type is native int size.
+
 	{name: "Cvt32Uto32F", argLength: 1}, // uint32 -> float32, only used on 32-bit arch
 	{name: "Cvt32Uto64F", argLength: 1}, // uint32 -> float64, only used on 32-bit arch
 	{name: "Cvt32Fto32U", argLength: 1}, // float32 -> uint32, only used on 32-bit arch
@@ -532,6 +545,7 @@ var genericOps = []opData{
 	{name: "AtomicLoad64", argLength: 2, typ: "(UInt64,Mem)"},                                  // Load from arg0.  arg1=memory.  Returns loaded value and new memory.
 	{name: "AtomicLoadPtr", argLength: 2, typ: "(BytePtr,Mem)"},                                // Load from arg0.  arg1=memory.  Returns loaded value and new memory.
 	{name: "AtomicLoadAcq32", argLength: 2, typ: "(UInt32,Mem)"},                               // Load from arg0.  arg1=memory.  Lock acquisition, returns loaded value and new memory.
+	{name: "AtomicStore8", argLength: 3, typ: "Mem", hasSideEffects: true},                     // Store arg1 to *arg0.  arg2=memory.  Returns memory.
 	{name: "AtomicStore32", argLength: 3, typ: "Mem", hasSideEffects: true},                    // Store arg1 to *arg0.  arg2=memory.  Returns memory.
 	{name: "AtomicStore64", argLength: 3, typ: "Mem", hasSideEffects: true},                    // Store arg1 to *arg0.  arg2=memory.  Returns memory.
 	{name: "AtomicStorePtrNoWB", argLength: 3, typ: "Mem", hasSideEffects: true},               // Store arg1 to *arg0.  arg2=memory.  Returns memory.
